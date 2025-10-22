@@ -1,0 +1,266 @@
+import noble from '@abandonware/noble';
+import winston from 'winston';
+
+// Configure winston logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf(({ timestamp, level, message }) => {
+      return `${timestamp} [${level}]: ${message}`;
+    })
+  ),
+  transports: [
+    new winston.transports.Console({ level: 'error' }), // Only log errors to stderr
+  ],
+});
+
+interface FurbyDevice {
+  peripheral: any;
+  generalPlusCharacteristic: any;
+  nordicCharacteristic: any;
+  name: string;
+  uuid: string;
+}
+
+export class FurbyController {
+  private connectedFurby: FurbyDevice | null = null;
+  private scanning = false;
+
+  constructor() {
+    // Set up noble state monitoring
+    noble.on('stateChange', (state: string) => {
+      logger.info(`Bluetooth state changed to: ${state}`);
+    });
+  }
+
+  /**
+   * Connect to a Furby device
+   */
+  async connect(furbyName?: string): Promise<void> {
+    if (this.connectedFurby) {
+      throw new Error('Already connected to a Furby. Disconnect first.');
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        noble.stopScanning();
+        this.scanning = false;
+        reject(new Error('Timeout: Could not find Furby device'));
+      }, 30000); // 30 second timeout
+
+      noble.on('discover', async (peripheral: any) => {
+        const name = peripheral.advertisement?.localName || '';
+        
+        // Check if this is a Furby device
+        if (name.includes('Furby') || (!furbyName && name)) {
+          if (furbyName && !name.includes(furbyName)) {
+            return; // Skip if specific name requested and doesn't match
+          }
+
+          clearTimeout(timeout);
+          noble.stopScanning();
+          this.scanning = false;
+
+          try {
+            logger.info(`Connecting to ${name}...`);
+            await this.connectToPeripheral(peripheral, name);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }
+      });
+
+      // Start scanning
+      if (noble._state === 'poweredOn') {
+        noble.startScanning([], false);
+        this.scanning = true;
+      } else {
+        noble.once('stateChange', (state: string) => {
+          if (state === 'poweredOn') {
+            noble.startScanning([], false);
+            this.scanning = true;
+          } else {
+            clearTimeout(timeout);
+            reject(new Error(`Bluetooth is not available: ${state}`));
+          }
+        });
+      }
+    });
+  }
+
+  /**
+   * Connect to a specific peripheral
+   */
+  private async connectToPeripheral(peripheral: any, name: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      peripheral.connect((err: Error) => {
+        if (err) {
+          reject(new Error(`Failed to connect: ${err.message}`));
+          return;
+        }
+
+        peripheral.discoverAllServicesAndCharacteristics(
+          (err: Error, services: any[], characteristics: any[]) => {
+            if (err) {
+              reject(new Error(`Failed to discover services: ${err.message}`));
+              return;
+            }
+
+            // Find the characteristics we need
+            // Based on bluefluff documentation, Furby uses specific UUIDs
+            let generalPlusChar = null;
+            let nordicChar = null;
+
+            for (const char of characteristics) {
+              const uuid = char.uuid.toLowerCase();
+              // GeneralPlus characteristic (for commands)
+              if (uuid.includes('10b20101')) {
+                generalPlusChar = char;
+              }
+              // Nordic characteristic (for DLC updates)
+              if (uuid.includes('10b20201')) {
+                nordicChar = char;
+              }
+            }
+
+            if (!generalPlusChar) {
+              peripheral.disconnect();
+              reject(new Error('Could not find GeneralPlus characteristic'));
+              return;
+            }
+
+            this.connectedFurby = {
+              peripheral,
+              generalPlusCharacteristic: generalPlusChar,
+              nordicCharacteristic: nordicChar,
+              name,
+              uuid: peripheral.uuid,
+            };
+
+            logger.info(`Connected to ${name}`);
+            resolve();
+          }
+        );
+      });
+    });
+  }
+
+  /**
+   * Disconnect from the current Furby
+   */
+  async disconnect(): Promise<void> {
+    if (!this.connectedFurby) {
+      throw new Error('Not connected to any Furby');
+    }
+
+    return new Promise((resolve, reject) => {
+      this.connectedFurby!.peripheral.disconnect((err: Error) => {
+        if (err) {
+          reject(new Error(`Failed to disconnect: ${err.message}`));
+        } else {
+          logger.info(`Disconnected from ${this.connectedFurby!.name}`);
+          this.connectedFurby = null;
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Write data to GeneralPlus characteristic
+   */
+  private async generalPlusWrite(data: Buffer): Promise<void> {
+    if (!this.connectedFurby) {
+      throw new Error('Not connected to any Furby');
+    }
+
+    return new Promise((resolve, reject) => {
+      this.connectedFurby!.generalPlusCharacteristic.write(
+        data,
+        false,
+        (err: Error) => {
+          if (err) {
+            reject(new Error(`Write failed: ${err.message}`));
+          } else {
+            resolve();
+          }
+        }
+      );
+    });
+  }
+
+  /**
+   * Set antenna LED color
+   */
+  async setAntennaColor(red: number, green: number, blue: number): Promise<void> {
+    const command = Buffer.from([0x14, red, green, blue]);
+    await this.generalPlusWrite(command);
+  }
+
+  /**
+   * Control LCD backlight
+   */
+  async setLcdLight(state: boolean): Promise<void> {
+    const command = Buffer.from([0xcd, state ? 1 : 0]);
+    await this.generalPlusWrite(command);
+  }
+
+  /**
+   * Perform an action
+   */
+  async doAction(input: number, index: number, subindex: number, specific: number): Promise<void> {
+    const command = Buffer.from([0x13, 0x00, input, index, subindex, specific]);
+    await this.generalPlusWrite(command);
+  }
+
+  /**
+   * Show debug screen
+   */
+  async showDebugScreen(): Promise<void> {
+    const command = Buffer.from([0xdb]);
+    await this.generalPlusWrite(command);
+  }
+
+  /**
+   * Set Furby name
+   */
+  async setName(nameId: number): Promise<void> {
+    // First set the name
+    const setNameCmd = Buffer.from([0x21, nameId]);
+    await this.generalPlusWrite(setNameCmd);
+    
+    // Then make Furby say the name
+    const sayNameCmd = Buffer.from([0x13, 0x00, 0x21, 0x00, 0x00, nameId]);
+    await this.generalPlusWrite(sayNameCmd);
+  }
+
+  /**
+   * Set mood parameter
+   */
+  async setMood(action: number, type: number, value: number): Promise<void> {
+    const command = Buffer.from([0x23, action, type, value]);
+    await this.generalPlusWrite(command);
+  }
+
+  /**
+   * Check if connected
+   */
+  isConnected(): boolean {
+    return this.connectedFurby !== null;
+  }
+
+  /**
+   * Get connected Furby info
+   */
+  getConnectedFurbyInfo(): { name: string; uuid: string } | null {
+    if (!this.connectedFurby) {
+      return null;
+    }
+    return {
+      name: this.connectedFurby.name,
+      uuid: this.connectedFurby.uuid,
+    };
+  }
+}

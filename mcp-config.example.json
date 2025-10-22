@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "furby": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "/path/to/furby-mcp",
+      "env": {}
+    }
+  }
+}
