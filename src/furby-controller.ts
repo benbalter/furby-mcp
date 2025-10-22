@@ -1,4 +1,5 @@
 import winston from 'winston';
+import type * as Noble from '@abandonware/noble';
 
 // Configure winston logger
 const logger = winston.createLogger({
@@ -15,9 +16,9 @@ const logger = winston.createLogger({
 });
 
 interface FurbyDevice {
-  peripheral: any;
-  generalPlusCharacteristic: any;
-  nordicCharacteristic: any;
+  peripheral: Noble.Peripheral;
+  generalPlusCharacteristic: Noble.Characteristic;
+  nordicCharacteristic: Noble.Characteristic | null;
   name: string;
   uuid: string;
 }
@@ -25,7 +26,7 @@ interface FurbyDevice {
 export class FurbyController {
   private connectedFurby: FurbyDevice | null = null;
   private scanning = false;
-  private noble: any = null;
+  private noble: typeof Noble | null = null;
 
   constructor() {
     // Noble will be lazily initialized on first connect
@@ -36,7 +37,7 @@ export class FurbyController {
     
     // Dynamically import noble only when needed
     const nobleModule = await import('@abandonware/noble');
-    this.noble = nobleModule.default;
+    this.noble = nobleModule;
     
     // Set up noble state monitoring
     this.noble.on('stateChange', (state: string) => {
@@ -55,14 +56,18 @@ export class FurbyController {
       throw new Error('Already connected to a Furby. Disconnect first.');
     }
 
+    if (!this.noble) {
+      throw new Error('Failed to initialize Bluetooth');
+    }
+
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.noble.stopScanning();
+        this.noble!.stopScanning();
         this.scanning = false;
         reject(new Error('Timeout: Could not find Furby device'));
       }, 30000); // 30 second timeout
 
-      this.noble.on('discover', async (peripheral: any) => {
+      this.noble!.on('discover', async (peripheral: Noble.Peripheral) => {
         const name = peripheral.advertisement?.localName || '';
         
         // Check if this is a Furby device
@@ -72,7 +77,7 @@ export class FurbyController {
           }
 
           clearTimeout(timeout);
-          this.noble.stopScanning();
+          this.noble!.stopScanning();
           this.scanning = false;
 
           try {
@@ -86,13 +91,13 @@ export class FurbyController {
       });
 
       // Start scanning
-      if (this.noble._state === 'poweredOn') {
-        this.noble.startScanning([], false);
+      if (this.noble!._state === 'poweredOn') {
+        this.noble!.startScanning([], false);
         this.scanning = true;
       } else {
-        this.noble.once('stateChange', (state: string) => {
+        this.noble!.once('stateChange', (state: string) => {
           if (state === 'poweredOn') {
-            this.noble.startScanning([], false);
+            this.noble!.startScanning([], false);
             this.scanning = true;
           } else {
             clearTimeout(timeout);
@@ -106,25 +111,25 @@ export class FurbyController {
   /**
    * Connect to a specific peripheral
    */
-  private async connectToPeripheral(peripheral: any, name: string): Promise<void> {
+  private async connectToPeripheral(peripheral: Noble.Peripheral, name: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      peripheral.connect((err: Error) => {
+      peripheral.connect((err: string) => {
         if (err) {
-          reject(new Error(`Failed to connect: ${err.message}`));
+          reject(new Error(`Failed to connect: ${err}`));
           return;
         }
 
         peripheral.discoverAllServicesAndCharacteristics(
-          (err: Error, services: any[], characteristics: any[]) => {
+          (err: string, services: Noble.Service[], characteristics: Noble.Characteristic[]) => {
             if (err) {
-              reject(new Error(`Failed to discover services: ${err.message}`));
+              reject(new Error(`Failed to discover services: ${err}`));
               return;
             }
 
             // Find the characteristics we need
             // Based on bluefluff documentation, Furby uses specific UUIDs
-            let generalPlusChar = null;
-            let nordicChar = null;
+            let generalPlusChar: Noble.Characteristic | null = null;
+            let nordicChar: Noble.Characteristic | null = null;
 
             for (const char of characteristics) {
               const uuid = char.uuid.toLowerCase();
@@ -168,15 +173,11 @@ export class FurbyController {
       throw new Error('Not connected to any Furby');
     }
 
-    return new Promise((resolve, reject) => {
-      this.connectedFurby!.peripheral.disconnect((err: Error) => {
-        if (err) {
-          reject(new Error(`Failed to disconnect: ${err.message}`));
-        } else {
-          logger.info(`Disconnected from ${this.connectedFurby!.name}`);
-          this.connectedFurby = null;
-          resolve();
-        }
+    return new Promise((resolve) => {
+      this.connectedFurby!.peripheral.disconnect(() => {
+        logger.info(`Disconnected from ${this.connectedFurby!.name}`);
+        this.connectedFurby = null;
+        resolve();
       });
     });
   }
@@ -193,9 +194,9 @@ export class FurbyController {
       this.connectedFurby!.generalPlusCharacteristic.write(
         data,
         false,
-        (err: Error) => {
+        (err: string) => {
           if (err) {
-            reject(new Error(`Write failed: ${err.message}`));
+            reject(new Error(`Write failed: ${err}`));
           } else {
             resolve();
           }
