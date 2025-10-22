@@ -1,4 +1,3 @@
-import noble from '@abandonware/noble';
 import winston from 'winston';
 
 // Configure winston logger
@@ -26,10 +25,21 @@ interface FurbyDevice {
 export class FurbyController {
   private connectedFurby: FurbyDevice | null = null;
   private scanning = false;
+  private noble: any = null;
 
   constructor() {
+    // Noble will be lazily initialized on first connect
+  }
+
+  private async initNoble() {
+    if (this.noble) return;
+    
+    // Dynamically import noble only when needed
+    const nobleModule = await import('@abandonware/noble');
+    this.noble = nobleModule.default;
+    
     // Set up noble state monitoring
-    noble.on('stateChange', (state: string) => {
+    this.noble.on('stateChange', (state: string) => {
       logger.info(`Bluetooth state changed to: ${state}`);
     });
   }
@@ -38,18 +48,21 @@ export class FurbyController {
    * Connect to a Furby device
    */
   async connect(furbyName?: string): Promise<void> {
+    // Initialize noble on first connect
+    await this.initNoble();
+    
     if (this.connectedFurby) {
       throw new Error('Already connected to a Furby. Disconnect first.');
     }
 
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        noble.stopScanning();
+        this.noble.stopScanning();
         this.scanning = false;
         reject(new Error('Timeout: Could not find Furby device'));
       }, 30000); // 30 second timeout
 
-      noble.on('discover', async (peripheral: any) => {
+      this.noble.on('discover', async (peripheral: any) => {
         const name = peripheral.advertisement?.localName || '';
         
         // Check if this is a Furby device
@@ -59,7 +72,7 @@ export class FurbyController {
           }
 
           clearTimeout(timeout);
-          noble.stopScanning();
+          this.noble.stopScanning();
           this.scanning = false;
 
           try {
@@ -73,13 +86,13 @@ export class FurbyController {
       });
 
       // Start scanning
-      if (noble._state === 'poweredOn') {
-        noble.startScanning([], false);
+      if (this.noble._state === 'poweredOn') {
+        this.noble.startScanning([], false);
         this.scanning = true;
       } else {
-        noble.once('stateChange', (state: string) => {
+        this.noble.once('stateChange', (state: string) => {
           if (state === 'poweredOn') {
-            noble.startScanning([], false);
+            this.noble.startScanning([], false);
             this.scanning = true;
           } else {
             clearTimeout(timeout);
