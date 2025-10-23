@@ -5,12 +5,21 @@ Setup script for Furby DLC Editor
 """
 
 from setuptools import setup, find_packages
+import os
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
-with open("requirements.txt", "r", encoding="utf-8") as fh:
-    requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+# Define requirements directly to avoid installation issues
+requirements = ["Pillow>=10.2.0"]
+
+# Try to read from requirements.txt if available (for development)
+if os.path.exists("requirements.txt"):
+    try:
+        with open("requirements.txt", "r", encoding="utf-8") as fh:
+            requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+    except Exception:
+        pass  # Fall back to default requirements
 
 setup(
     name="furby-dlc-editor",

@@ -5,7 +5,8 @@ Thank you for your interest in contributing to the Furby DLC Editor! This docume
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/furby-mcp.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/furby-mcp.git`  
+   (Replace `YOUR_USERNAME` with your GitHub username)
 3. Install dependencies: `pip install -r requirements.txt`
 4. Create a new branch: `git checkout -b feature/your-feature-name`
 

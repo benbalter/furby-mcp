@@ -165,7 +165,7 @@ def main():
     print("For more information:")
     print("  - See README.md")
     print("  - Run: python dlc_editor.py --help")
-    print("  - Visit: https://github.com/ctxis/Furby")
+    print("  - Original library: https://github.com/ctxis/Furby")
     print("=" * 60)
     print("\n")
 
