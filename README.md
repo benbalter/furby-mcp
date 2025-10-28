@@ -10,6 +10,7 @@ This project uses the [ctxis/Furby](https://github.com/ctxis/Furby) library to p
 - 🎵 **Extract audio tracks** - Export all audio tracks from a DLC file
 - 🔄 **Replace audio tracks** - Swap individual audio tracks with custom ones
 - 🎨 **Extract sprites** - Export all sprite/cel graphics as PNG images
+- 🖼️ **Replace sprites** - Swap individual sprites with custom images from GIF files
 - 💾 **Save modifications** - Build modified DLC files ready for use
 
 ## Installation
@@ -81,6 +82,26 @@ Where:
 - `new_audio.a18` is your replacement audio file
 - `modified.dlc` is the output file with your changes
 
+### Replace Sprite
+
+Replace a specific sprite with a new image:
+
+```bash
+# Replace sprite with a 128x128 indexed GIF
+python dlc_editor.py replace-sprite path/to/dlc_file.dlc 10 new_sprite.gif -o modified.dlc
+
+# Replace sprite and add a new palette from another GIF
+python dlc_editor.py replace-sprite path/to/dlc_file.dlc 10 new_sprite.gif -o modified.dlc -p palette.gif
+```
+
+Where:
+- `10` is the sprite number to replace (0-indexed)
+- `new_sprite.gif` must be a 128x128 pixel indexed GIF (6-bit color, 64 colors max)
+- `-p palette.gif` is optional and extracts a new color palette from the specified GIF
+- `modified.dlc` is the output file with your changes
+
+**Note**: Sprites are 64x64 pixels, but the input image must be 128x128 as it gets "quarterized" into the correct format automatically.
+
 ## DLC File Format
 
 Furby Connect DLC files contain multiple sections:
@@ -115,6 +136,9 @@ python dlc_editor.py extract-sprites tu012700.dlc -o sprites/
 
 # Replace audio track 10 and save
 python dlc_editor.py replace-audio tu012700.dlc 10 custom_sound.a18 -o custom.dlc
+
+# Replace sprite 5 with a custom image
+python dlc_editor.py replace-sprite tu012700.dlc 5 my_sprite.gif -o custom.dlc
 ```
 
 ## Credits

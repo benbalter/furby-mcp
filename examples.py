@@ -34,6 +34,9 @@ def example_cli_usage():
         
         ("Replace audio track 5",
          "python dlc_editor.py replace-audio my_dlc.dlc 5 new_audio.a18 -o modified.dlc"),
+        
+        ("Replace sprite 10",
+         "python dlc_editor.py replace-sprite my_dlc.dlc 10 new_sprite.gif -o modified.dlc"),
     ]
     
     for description, command in examples:
@@ -72,7 +75,12 @@ editor.load_dlc("my_dlc.dlc")
 editor.replace_audio_track(5, "new_audio.a18")
 editor.save_dlc("modified.dlc")
 
-# Example 5: Direct manipulation using furby library
+# Example 5: Replace a sprite and save
+editor.load_dlc("my_dlc.dlc")
+editor.replace_sprite(10, "new_sprite.gif")
+editor.save_dlc("modified.dlc")
+
+# Example 6: Direct manipulation using furby library
 from furby import dlc
 
 # Load DLC

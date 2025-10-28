@@ -57,6 +57,11 @@ class TestDLCEditor(unittest.TestCase):
         result = self.editor.replace_audio_track(0, "fake.a18")
         self.assertFalse(result)
     
+    def test_replace_sprite_without_loading(self):
+        """Test replace sprite without loading a DLC"""
+        result = self.editor.replace_sprite(0, "fake.gif")
+        self.assertFalse(result)
+    
     def test_save_without_loading(self):
         """Test save without loading a DLC"""
         output_file = os.path.join(self.temp_dir, "output.dlc")

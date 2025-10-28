@@ -186,6 +186,60 @@ class DLCEditor:
         print(f"✓ All sprites extracted successfully")
         return True
     
+    def replace_sprite(self, sprite_number, image_file, palette_file=None):
+        """Replace a specific sprite with an image from a GIF file"""
+        if not self.dlc:
+            print("Error: No DLC file loaded")
+            return False
+        
+        if "CEL" not in self.dlc.dlc_sections:
+            print("Error: No sprite section (CEL) found in DLC")
+            return False
+        
+        if not os.path.exists(image_file):
+            print(f"Error: Image file '{image_file}' not found")
+            return False
+        
+        try:
+            num_cels = len(self.dlc.dlc_sections["CEL"].cels)
+            if sprite_number >= num_cels:
+                print(f"Error: Sprite number {sprite_number} out of range (0-{num_cels-1})")
+                return False
+            
+            print(f"Replacing sprite {sprite_number} with {image_file}")
+            
+            # If a palette file is provided, extract and add the palette
+            if palette_file:
+                if not os.path.exists(palette_file):
+                    print(f"Error: Palette file '{palette_file}' not found")
+                    return False
+                
+                print(f"Extracting palette from {palette_file}")
+                new_palette = self.dlc.dlc_sections["PAL"].extract_palette(palette_file)
+                # Add the new palette if it doesn't exist
+                self.dlc.dlc_sections["PAL"].palettes.append(new_palette)
+                print(f"✓ Added new palette (index {len(self.dlc.dlc_sections['PAL'].palettes)-1})")
+            
+            # Quarterize the image into sprite quarters
+            new_cels = self.dlc.dlc_sections["CEL"].quarterize(image_file)
+            
+            if not new_cels:
+                print("Error: Failed to process image file. Make sure it's a 128x128 indexed GIF.")
+                return False
+            
+            # Replace the sprite
+            self.dlc.dlc_sections["CEL"].cels[sprite_number] = new_cels[0]
+            print(f"✓ Sprite {sprite_number} replaced successfully")
+            
+            if len(new_cels) > 1:
+                print(f"Note: Image contained {len(new_cels)} sprite quarters. Only the first one was used.")
+                print(f"      To replace multiple sprites, run this command multiple times.")
+            
+            return True
+        except Exception as e:
+            print(f"Error replacing sprite: {e}")
+            return False
+    
     def save_dlc(self, output_file):
         """Save the modified DLC to a new file"""
         if not self.dlc:
@@ -220,6 +274,9 @@ Examples:
   
   # Replace an audio track
   %(prog)s replace-audio my_dlc.dlc 5 new_audio.a18 -o modified.dlc
+  
+  # Replace a sprite
+  %(prog)s replace-sprite my_dlc.dlc 10 new_sprite.gif -o modified.dlc
         """
     )
     
@@ -246,6 +303,14 @@ Examples:
     replace_audio_parser.add_argument('track_number', type=int, help='Track number to replace')
     replace_audio_parser.add_argument('audio_file', help='Path to new audio file (.a18)')
     replace_audio_parser.add_argument('-o', '--output', required=True, help='Output DLC file')
+    
+    # Replace sprite command
+    replace_sprite_parser = subparsers.add_parser('replace-sprite', help='Replace a sprite/cel')
+    replace_sprite_parser.add_argument('dlc_file', help='Path to DLC file')
+    replace_sprite_parser.add_argument('sprite_number', type=int, help='Sprite number to replace')
+    replace_sprite_parser.add_argument('image_file', help='Path to new image file (128x128 indexed GIF)')
+    replace_sprite_parser.add_argument('-o', '--output', required=True, help='Output DLC file')
+    replace_sprite_parser.add_argument('-p', '--palette', help='Optional: GIF file to extract palette from')
     
     args = parser.parse_args()
     
@@ -277,6 +342,14 @@ Examples:
     elif args.command == 'replace-audio':
         if editor.load_dlc(args.dlc_file):
             if editor.replace_audio_track(args.track_number, args.audio_file):
+                if editor.save_dlc(args.output):
+                    return 0
+        return 1
+    
+    elif args.command == 'replace-sprite':
+        if editor.load_dlc(args.dlc_file):
+            palette_file = getattr(args, 'palette', None)
+            if editor.replace_sprite(args.sprite_number, args.image_file, palette_file):
                 if editor.save_dlc(args.output):
                     return 0
         return 1
