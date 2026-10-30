@@ -1,0 +1,42 @@
+[project]
+name = "furby-mcp"
+version = "0.1.0"
+description = "An MCP server for Furby Connect toys: find them, play their actions, light their antennas and flash DLCs, over Bluetooth LE"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "src/furby_mcp/data/BLUEFLUFF-LICENSE.md"]
+authors = [{ name = "Ben Balter", email = "ben@balter.com" }]
+requires-python = ">=3.11"
+keywords = ["furby", "furby-connect", "mcp", "model-context-protocol", "bluetooth", "ble"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Topic :: Home Automation",
+    "Topic :: System :: Hardware",
+]
+# mcp 2 renamed FastMCP to MCPServer, so 1.x won't do
+dependencies = ["bleak>=3.0.2", "mcp>=2.3,<3"]
+
+[project.urls]
+Homepage = "https://github.com/benbalter/furby-mcp"
+Issues = "https://github.com/benbalter/furby-mcp/issues"
+
+[project.scripts]
+furby-mcp = "furby_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.2.0", "pytest-asyncio>=1.4.1", "ruff>=0.17.3"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
