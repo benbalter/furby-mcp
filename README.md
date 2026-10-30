@@ -48,6 +48,15 @@ claude mcp add furby -- uvx --from git+https://github.com/benbalter/furby-mcp fu
 
 Add `--verbose` after `furby-mcp` to log Bluetooth activity to stderr.
 
+**From a local checkout** (to try changes, or to pin a version):
+
+```sh
+git clone https://github.com/benbalter/furby-mcp
+claude mcp add furby -- uv --directory "$PWD/furby-mcp" run furby-mcp
+```
+
+MCP clients load servers when a session starts, so start a new session after adding it.
+
 ### Bluetooth permission on macOS
 
 macOS asks for Bluetooth permission for the app that starts the server: your terminal for Claude Code, or Claude Desktop. If nothing is ever found, check **System Settings → Privacy & Security → Bluetooth**.
@@ -57,6 +66,8 @@ macOS asks for Bluetooth permission for the app that starts the server: your ter
 1. **Wake the Furby** by tilting it or petting its head. A sleeping Furby doesn't advertise, so it can't be found.
 2. **Ask your MCP client to connect**, for example "connect to my Furby". Once connected, the server keeps the Furby awake until you disconnect it.
 3. **Ask for things in plain words**: "make it sing", "make both Furbies burp", "turn the antenna off".
+
+**One app at a time.** A Furby accepts one Bluetooth connection, and a connected Furby stops advertising. While this server holds it, the Furby Connect World app, FurBLE or another script can't find it. Disconnect first.
 
 **Two Furbies at once.** Two Furby Connects near each other start singing together, and while they do, neither one advertises, so neither can be found. Wake one, connect to it, then wake the next and connect again.
 
@@ -72,7 +83,7 @@ macOS asks for Bluetooth permission for the app that starts the server: your ter
 
 To build your own DLCs, see [ctxis/Furby](https://github.com/ctxis/Furby) and [benbalter/Furby](https://github.com/benbalter/Furby).
 
-**What a DLC changes.** A DLC only changes what plays when an action is triggered over Bluetooth. The Furby's own reactions to being petted, tilted or fed come from its built-in memory, whatever DLC is active. Custom DLCs usually put their clips on input 75 ("app videos").
+**What a DLC changes.** A DLC only changes what plays when an action is triggered over Bluetooth. The Furby's own reactions to being petted, tilted or fed come from its built-in memory, whatever DLC is active. Input 75 ("app videos") is where DLCs keep their own clips, so what it plays depends on the DLC; `find_actions` has no transcriptions for it.
 
 ## What's tested on real Furbies
 
@@ -82,12 +93,16 @@ These come from [bluefluff](https://github.com/Jeija/bluefluff)'s and [PyFluff](
 
 The server itself is tested against a simulated Furby (`tests/fake.py`), not yet end to end with a real one.
 
-## Development
+## Contributing
+
+Bug reports and pull requests are welcome, especially results from real Furbies: what played, what didn't, and which firmware or DLC it had (`furby_status` shows the DLC). Please [open an issue](https://github.com/benbalter/furby-mcp/issues) first for anything big.
 
 ```sh
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
+
+The tests run against a simulated Furby, so they need no hardware or Bluetooth. Please don't add real DLC files or Furby audio to the repo: they're Hasbro's.
 
 ## Credits
 
