@@ -10,22 +10,22 @@ It works with more than one Furby at a time, and it knows about 1,500 of the thi
 
 | Tool | What it does |
 | --- | --- |
-| `connect_furby` | Finds and connects to every Furby in range (or one, by address), and reports each one's active DLC |
+| `connect_furby` | Finds and connects to every Furby in range (or one, by address), and reports each one's active DLC, plus any it found but couldn't connect to |
 | `scan_furbies` | Lists Furbies in range without connecting |
 | `furby_status` | Shows each connected Furby's antenna colour and stored DLCs: slots, names, checksums, which is active |
 | `find_actions` | Searches what a stock Furby can say or do ("fart", "sing", "sleepy") and returns the action codes |
-| `trigger_action` | Plays an action. If the Furby is still busy with the last one, it waits and tries again, since a busy Furby plays new actions without sound. It reports whether the sound played |
+| `trigger_action` | Plays an action, on every Furby at once if you ask for all of them. If a Furby is still busy with its last action, it waits and tries again, since a busy Furby plays new actions without sound. It reports whether the sound played |
 | `set_antenna` | Sets the antenna light to any RGB colour, or off |
 | `set_eyes` | Turns the eyes' backlight on or off |
 | `set_mood` | Sets or adds to a mood meter: excitedness, displeasedness, tiredness, fullness, wellness (untested on hardware) |
-| `flash_dlc` | Uploads a `.dlc` file and makes it the active DLC. **This deletes every DLC already on that Furby.** |
+| `flash_dlc` | Uploads a `.dlc` file and makes it the active DLC. **This deletes every DLC already on that Furby**, and reports which ones it deleted |
 | `disconnect_furby` | Lets go of one Furby or all of them |
 
-Tools that act on a Furby take an optional `furby`: its Bluetooth address, or the name of its active DLC. With one Furby connected you can leave it out, and `"all"` means every connected Furby.
+Tools that act on a Furby take an optional `furby`: its Bluetooth address, the name of its active DLC, or `"all"`. Leave it out to mean the only connected Furby; with several connected, the tool asks which. `furby_status` and `disconnect_furby` default to all of them instead.
 
 ## Install
 
-You need Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). It isn't on PyPI yet, so for now `uvx` runs it from GitHub:
+You need [uv](https://docs.astral.sh/uv/), which fetches Python 3.11 or newer if you don't have it. The server isn't on PyPI yet, so for now `uvx` runs it from GitHub:
 
 **Claude Code**
 
@@ -62,7 +62,15 @@ macOS asks for Bluetooth permission for the app that starts the server: your ter
 
 **Addresses.** On Linux and Windows a Furby's address is its Bluetooth MAC address. On macOS it's a UUID that macOS makes up, which differs from one computer to the next.
 
-**Flashing.** A DLC is a Furby's content pack: sounds, eye animations and action sequences. `flash_dlc` takes 2–3 minutes for a 300 KB file, and files over about 350 KB time out mid-upload. The Furby stores DLCs under 8.3 names, so a DLC's name can be 1–8 letters or digits. The antenna turns green when the upload is done, red if it failed. Some MCP clients time out long tool calls; in Claude Code, raise `MCP_TOOL_TIMEOUT` if a flash gets cut off. To build your own DLCs, see [ctxis/Furby](https://github.com/ctxis/Furby) and [benbalter/Furby](https://github.com/benbalter/Furby).
+**Flashing.** A DLC is a Furby's content pack: sounds, eye animations and action sequences.
+
+- **It's slow.** Each 20-byte packet goes out 15 ms after the last, so a 300 KB file takes about 4 minutes (300,000 ÷ 20 × 15 ms ≈ 225 s, plus overhead). Files over 350 KB are refused, since they time out mid-upload.
+- **Give it the full path** to a `.dlc` file on the computer running the server.
+- **Names are short.** The Furby stores DLCs under 8.3 names, so a DLC's name is 1–8 letters or digits. It defaults to the file's name; pass `name` to pick another.
+- **Watch the antenna.** It turns green when the upload is done, red if it failed.
+- **Don't cut it off.** The old DLCs are deleted before the upload starts, so a flash that's cancelled or times out leaves the Furby with no DLC: flash it again. Some MCP clients time out long tool calls. In Claude Code, set `MCP_TOOL_TIMEOUT` (in milliseconds) above the flash time, e.g. `MCP_TOOL_TIMEOUT=600000 claude` for 10 minutes.
+
+To build your own DLCs, see [ctxis/Furby](https://github.com/ctxis/Furby) and [benbalter/Furby](https://github.com/benbalter/Furby).
 
 **What a DLC changes.** A DLC only changes what plays when an action is triggered over Bluetooth. The Furby's own reactions to being petted, tilted or fed come from its built-in memory, whatever DLC is active. Custom DLCs usually put their clips on input 75 ("app videos").
 

@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Ben Balter
 # SPDX-License-Identifier: MIT
+import asyncio
 import json
 import os
-import shutil
 import sys
 
+import anyio
 import pytest
-from mcp import Client, StdioServerParameters
+from mcp import Client
 
 from furby_mcp import actions, furby, protocol
 from furby_mcp.server import Furbies, create_server
@@ -78,6 +79,8 @@ def test_find():
     assert "hot dog" in found[0]["says"]  # whole words rank first
     notes, total = actions.find(input=71)
     assert total == 8 and notes[0]["says"] == '"Do"'
+    laughs, _ = actions.find(input=4)  # listed as "3, 4", so found under either
+    assert any(a["action"][0] == 3 for a in laughs)
     assert actions.find("zzzqqq") == ([], 0)
     assert actions.describe([1, 0, 0, 0])["category"] == "Generic reactions"
     assert actions.describe([255, 255, 255, 255]) is None
@@ -119,8 +122,16 @@ async def test_play_waits_out_a_busy_furby():
 
 
 async def test_play_gives_up_on_a_furby_that_stays_busy():
-    f = await connected(FakeClient(busy=99))
-    assert await f.play(1, 0, 0, 0, patience_s=0) == "silent"
+    client = FakeClient(busy=10**9)
+    f = await connected(client)
+    assert await f.play(1, 0, 0, 0, patience_s=0.05) == "silent"
+    assert sum(c[0] == 0x13 for c in client.sent) > 1  # it waited for each 20:0e and tried again
+    await f.disconnect()
+
+
+async def test_play_without_reply():
+    f = await connected(FakeClient(silent=True))
+    assert await f.play(1, 0, 0, 0) == "no reply"
     await f.disconnect()
 
 
@@ -139,10 +150,25 @@ async def test_flash():
     async def note(done, total):
         progress.append((done, total))
 
-    dlc = await f.flash(DLC, "pink", packet_delay=0, progress=note)
-    assert dlc["name"] == "PINK" and list(client.stored.values()) == [("PINK", DLC)]
+    result = await f.flash(DLC, "pink", packet_delay=0, progress=note)
+    assert result["dlc"]["name"] == "PINK" and list(client.stored.values()) == [("PINK", DLC)]
+    assert result["deleted"] == ["OLD", "OTHER"]
     assert f.antenna == (0, 255, 0)
-    assert progress and progress[0] == (0, len(DLC))
+    assert progress[0] == (0, len(DLC)) and progress[-1] == (len(DLC), len(DLC))
+    assert client.nordic[-1] == b"\x09\x00\x00" and protocol.lcd_command(True) in client.sent
+    await f.disconnect()
+
+
+async def test_cancelled_flash_cleans_up():
+    """A client timeout or Esc cancels the call mid-upload: the Furby must still get its eyes back and go red."""
+    client = FakeClient(stored={0: ("OLD", b"old")}, active=0)
+    f = await connected(client)
+    with anyio.move_on_after(0.05):
+        await f.flash(DLC, "pink", packet_delay=0.01)
+    assert not f.flashing and not client.stored
+    assert client.nordic[-1] == b"\x09\x00\x00"
+    assert protocol.lcd_command(True) in client.sent
+    assert client.sent[-1] == protocol.antenna_command(255, 0, 0) and f.antenna == (255, 0, 0)
     await f.disconnect()
 
 
@@ -198,8 +224,9 @@ async def test_tools_listed():
 async def test_connect_and_play():
     fake = FakeClient(stored={2: ("PINK", DLC)}, active=2)
     async with Client(create_server(fake_furbies(fake))) as client:
-        [status] = await call(client, "connect_furby")
+        [status] = (await call(client, "connect_furby"))["connected"]
         assert status["dlc"]["name"] == "PINK"
+        assert (await call(client, "connect_furby", address="aa:0"))["connected"][0]["address"] == "AA:0"
         [played] = await call(client, "trigger_action", input=1)
         assert played == {"furby": "AA:0", "action": [1, 0, 0, 0], "result": "played",
                           "says": '"ah-may moh-moh, kah kah more pet!"'}  # fmt: skip
@@ -213,7 +240,7 @@ async def test_two_furbies():
     async with Client(
         create_server(fake_furbies(FakeClient(), FakeClient(stored={0: ("BLUE", DLC)}, active=0)))
     ) as client:
-        assert len(await call(client, "connect_furby")) == 2
+        assert len((await call(client, "connect_furby"))["connected"]) == 2
         assert "say which" in await error(client, "trigger_action", input=1)
         [played] = await call(client, "trigger_action", input=1, furby="blue")
         assert played["furby"] == "AA:1"
@@ -228,7 +255,21 @@ async def test_helpful_errors():
         assert "Wake it" in await error(client, "connect_furby")
         assert "No Furby is connected" in await error(client, "set_antenna", red=1, green=2, blue=3)
         assert "0 to 255" in await error(client, "set_antenna", red=300, green=0, blue=0)
-        assert "isn't a .dlc" in await error(client, "flash_dlc", path="/nonexistent.dlc")
+        assert "doesn't exist" in await error(client, "flash_dlc", path="/nonexistent.dlc")
+        assert "isn't a .dlc" in await error(client, "flash_dlc", path="/etc/hosts")
+        assert "full path" in await error(client, "flash_dlc", path="pink.dlc")
+
+
+async def test_bluetooth_errors_reach_the_model():
+    fake = FakeClient()
+    async with Client(create_server(fake_furbies(fake))) as client:
+        await call(client, "connect_furby")
+
+        async def broken(*args, **kwargs):
+            raise TimeoutError()
+
+        fake.write_gatt_char = broken
+        assert "AA:0: TimeoutError. If it fell asleep" in await error(client, "set_eyes", on=False)
 
 
 async def test_flash_tool(tmp_path):
@@ -240,16 +281,39 @@ async def test_flash_tool(tmp_path):
         long = tmp_path / "toolongname.dlc"
         long.write_bytes(DLC)
         assert "8.3" in await error(client, "flash_dlc", path=str(long))
-        flashed = await call(client, "flash_dlc", path=str(path))
-        assert flashed["dlc"]["name"] == "SPOOKY"
+        flashing = asyncio.create_task(call(client, "flash_dlc", path=str(path)))
+        await asyncio.sleep(0.2)
+        assert "being flashed" in await error(client, "set_eyes", on=True)
+        flashed = await flashing
+        assert flashed["dlc"]["name"] == "SPOOKY" and flashed["deleted"] == []
     assert list(fake.stored.values()) == [("SPOOKY", DLC)]
 
 
 async def test_stdio_keeps_stdout_clean():
-    """Over stdio, stdout is the MCP channel: anything else printed there breaks the session."""
-    command = shutil.which("furby-mcp") or sys.executable
-    args = [] if command != sys.executable else ["-m", "furby_mcp"]
-    server = StdioServerParameters(command=command, args=[*args, "--verbose"], env=dict(os.environ))
-    async with Client(server) as client:
-        result = await client.call_tool("find_actions", {"query": "hiccup", "limit": 1})
-    assert not result.is_error and "hiccup" in result.content[0].text.lower()
+    """Over stdio, stdout is the MCP channel: every line on it must be JSON-RPC, or the session breaks."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "furby_mcp", "--verbose",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},  # so a stray print shows up at once, not at exit
+    )  # fmt: skip
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "find_actions", "arguments": {"query": "hiccup", "limit": 1}}},
+    ]  # fmt: skip
+    proc.stdin.write(b"".join(json.dumps(m).encode() + b"\n" for m in messages))
+    await proc.stdin.drain()
+    lines = []
+    try:
+        async with asyncio.timeout(20):
+            while not any(m.get("id") == 2 for m in lines):
+                line = await proc.stdout.readline()
+                assert line, "the server exited early"
+                lines.append(json.loads(line))  # fails on anything that isn't JSON
+    finally:
+        proc.kill()
+        await proc.wait()
+    assert all(m["jsonrpc"] == "2.0" for m in lines)
+    assert "hiccup" in json.dumps(lines[-1]).lower()

@@ -29,7 +29,8 @@ class FakeClient:
         self.is_connected = False
         self.listeners = {}
         self.sent = []  # GeneralPlus commands, in order
-        self.upload = None  # [expected size, bytearray] during a file transfer
+        self.upload = None  # [expected size, bytearray, name] during a file transfer
+        self.nordic = []  # Nordic commands, in order
 
     async def connect(self, timeout=None):
         self.is_connected = True
@@ -41,9 +42,12 @@ class FakeClient:
         self.listeners[uuid] = callback
 
     def reply(self, data, uuid=protocol.GP_LISTEN):
-        asyncio.get_running_loop().call_soon(self.listeners[uuid], None, bytearray(data))
+        # At once, before the write returns: the fastest a real Furby could answer, so code
+        # that only starts listening after sending a command misses the reply here too
+        self.listeners[uuid](None, bytearray(data))
 
     async def write_gatt_char(self, uuid, data, response=False):
+        await asyncio.sleep(0)  # a real write yields, which is where cancellation lands
         data = bytes(data)
         if uuid == protocol.FILE_WRITE:
             self.upload[1] += data
@@ -53,6 +57,7 @@ class FakeClient:
                 self.reply(b"\x24\x05")
             return
         if uuid == protocol.NORDIC_WRITE:
+            self.nordic.append(data)
             return
         self.sent.append(data)
         op = data[0]

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: MIT
 """The MCP server: tools that find, connect to and control Furby Connects."""
 
+import asyncio
 import contextlib
 import logging
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -23,13 +23,23 @@ INSTRUCTIONS = "\n\n".join(
         "be found: tilt it or pet its head. Two Furby Connects near each other start singing together, and while "
         "they do neither can be found, so wake them one at a time and connect to each before waking the next. "
         "Once connected, a Furby stays awake until disconnect_furby.",
-        "Tools that act on a Furby take an optional `furby`: its address, or the name of its active DLC. With one "
-        'Furby connected you can leave it out; "all" means every connected Furby.',
+        "Tools that act on a Furby take an optional `furby`: its address, the name of its active DLC, or "
+        '"all". Left out, it means the only connected Furby (furby_status and disconnect_furby: all of them).',
         "To make a Furby say or do something, look up the action with find_actions (bluefluff's transcription of "
         "what each stock action says), then play it with trigger_action. A DLC can change what actions play: "
         'input 75 ("app videos") is where custom DLCs usually put their own clips.',
     )
 )
+
+
+def reason(e):
+    """An exception's message, or its type when it has none (TimeoutError() says nothing)."""
+    return str(e) or type(e).__name__
+
+
+def failed(f, e):
+    """A ToolError the model can act on: the SDK hides other exceptions' text, and TimeoutError has none."""
+    return ToolError(f"{f.address}: {reason(e)}. If it fell asleep, wake it and call connect_furby.")
 
 
 class Furbies:
@@ -43,6 +53,9 @@ class Furbies:
     def forget(self, f):
         self.connected.pop(f.address, None)
 
+    def get(self, address):
+        return next((f for a, f in self.connected.items() if a.lower() == address.lower()), None)
+
     def pick(self, which=None):
         """The Furbies a tool should act on: one by address or DLC name, all of them, or the only one."""
         present = [f for f in self.connected.values() if f.connected]
@@ -51,17 +64,21 @@ class Furbies:
         if which is None:
             if len(present) > 1:
                 raise ToolError(f"{len(present)} Furbies are connected; say which: {', '.join(self.names())}, or all")
-            return present
-        if which.lower() == "all":
-            return present
-        found = [
-            f
-            for f in present
-            if f.address.lower() == which.lower() or (f.dlc and f.dlc["name"].lower() == which.lower())
-        ]
-        if not found:
-            raise ToolError(f"No connected Furby is called {which!r}. Connected: {', '.join(self.names())}")
-        return found
+            chosen = present
+        elif which.lower() == "all":
+            chosen = present
+        else:
+            chosen = [
+                f
+                for f in present
+                if f.address.lower() == which.lower() or (f.dlc and f.dlc["name"].lower() == which.lower())
+            ]
+            if not chosen:
+                raise ToolError(f"No connected Furby is called {which!r}. Connected: {', '.join(self.names())}")
+        flashing = [f.address for f in chosen if f.flashing]
+        if flashing:
+            raise ToolError(f"{', '.join(flashing)} is being flashed; try again when that's done")
+        return chosen
 
     def names(self):
         return [f"{f.address} ({f.dlc['name']})" if f.dlc else f.address for f in self.connected.values()]
@@ -80,6 +97,17 @@ def describe(f):
         "dlc": f.dlc,
         "antenna": list(f.antenna) if f.antenna else None,
     }
+
+
+async def each(chosen, act):
+    """Run act(furby) on every chosen Furby at once; raise the first failure as a ToolError."""
+    results = await asyncio.gather(*(act(f) for f in chosen), return_exceptions=True)
+    for f, result in zip(chosen, results, strict=True):
+        if isinstance(result, ToolError):
+            raise result
+        if isinstance(result, Exception):
+            raise failed(f, result)
+    return results
 
 
 def create_server(furbies=None):
@@ -102,21 +130,29 @@ def create_server(furbies=None):
 
         Connected Furbies stop advertising, so they won't appear here; see furby_status.
         """
-        return [{"address": d.address, "rssi": rssi} for d, rssi in await furbies.scan(timeout)]
+        try:
+            found = await furbies.scan(timeout)
+        except Exception as e:
+            raise ToolError(f"Bluetooth scan failed: {reason(e)}. Is Bluetooth on?") from None
+        return [{"address": d.address, "rssi": rssi} for d, rssi in found]
 
     @server.tool(annotations=gentle)
-    async def connect_furby(address: str | None = None, timeout: float = 8.0) -> list[dict]:
+    async def connect_furby(address: str | None = None, timeout: float = 8.0) -> dict:
         """Connect to the Furby with this address, or to every Furby in range that isn't connected yet.
 
-        Returns each connected Furby with its active DLC (None on a stock Furby).
+        Returns every connected Furby with its active DLC (None on a stock Furby), and any that
+        were found but couldn't be connected.
         """
-        found = [d for d, _ in await furbies.scan(timeout)]
+        if address and furbies.get(address):  # a connected Furby doesn't advertise, so don't scan for it
+            return {"connected": [describe(f) for f in furbies.connected.values()], "errors": []}
+        try:
+            found = [d for d, _ in await furbies.scan(timeout)]
+        except Exception as e:
+            raise ToolError(f"Bluetooth scan failed: {reason(e)}. Is Bluetooth on?") from None
         if address:
             found = [d for d in found if d.address.lower() == address.lower()]
-        found = [d for d in found if d.address not in furbies.connected]
-        if not found:
-            if address and address in furbies.connected:
-                return [describe(furbies.connected[address])]
+        found = [d for d in found if not furbies.get(d.address)]
+        if not found and not (furbies.connected and not address):
             raise ToolError(
                 "No Furby found. Wake it by tilting it or petting its head. If two Furbies are on and "
                 "singing together, neither can be found: turn one off, connect to the other, then turn it back on."
@@ -127,33 +163,33 @@ def create_server(furbies=None):
             try:
                 await f.connect()
             except Exception as e:  # asleep, busy, or connected to another app
-                errors.append(f"{device.address}: {e or type(e).__name__}")
+                errors.append(f"{device.address}: {reason(e)}")
                 continue
             furbies.connected[f.address] = f
             log.info("Connected to %s", f)
         if not furbies.connected:
             raise ToolError("Couldn't connect: " + "; ".join(errors))
-        return [describe(f) for f in furbies.connected.values()]
+        return {"connected": [describe(f) for f in furbies.connected.values()], "errors": errors}
 
     @server.tool(annotations=gentle)
     async def disconnect_furby(furby: str | None = "all") -> str:
         """Let go of a Furby (default: all of them), so it can sleep or connect to another app."""
         chosen = furbies.pick(furby)
         for f in chosen:
-            await f.disconnect()
+            with contextlib.suppress(Exception):  # gone already is fine
+                await f.disconnect()
             furbies.forget(f)
         return f"Disconnected {', '.join(f.address for f in chosen)}"
 
     @server.tool(annotations=read_only)
     async def furby_status(furby: str | None = "all") -> list[dict]:
         """Each connected Furby's address, antenna colour and stored DLCs (which slot is active, names, checksums)."""
-        out = []
-        for f in furbies.pick(furby):
-            status = describe(f)
-            status["slots"] = await f.read_dlc()
-            status["dlc"] = f.dlc
-            out.append(status)
-        return out
+
+        async def status(f):
+            slots = await f.read_dlc()
+            return {**describe(f), "slots": slots}
+
+        return await each(furbies.pick(furby), status)
 
     @server.tool(annotations=read_only)
     def find_actions(query: str = "", input: int | None = None, limit: int = 25) -> dict:
@@ -174,7 +210,8 @@ def create_server(furbies=None):
 
         A Furby still finishing its last action plays a new one without sound, so this waits for it
         to finish (up to about 25 s) and tries again. "result" is "played", "silent" (still busy after
-        all that), or "no reply" (it probably played; the Furby didn't confirm).
+        all that), or "no reply" (it probably played; the Furby didn't confirm). With furby="all",
+        every Furby plays it at once.
         """
         code = [input, index, subindex, specific]
         try:
@@ -182,17 +219,18 @@ def create_server(furbies=None):
         except ValueError as e:
             raise ToolError(str(e)) from None
         entry = actions.describe(code)
-        out = []
-        for f in furbies.pick(furby):
+
+        async def play(f):
             try:
                 result = await f.play(*code)
-            except ValueError as e:
+            except ValueError as e:  # the Furby says it has no such action
                 raise ToolError(f"{f.address}: {e}") from None
-            out.append({"furby": f.address, "action": code, "result": result, "says": entry and entry["says"]})
-        return out
+            return {"furby": f.address, "action": code, "result": result, "says": entry and entry["says"]}
+
+        return await each(furbies.pick(furby), play)
 
     @server.tool(annotations=gentle)
-    async def set_antenna(red: int, green: int, blue: int, furby: str | None = "all") -> str:
+    async def set_antenna(red: int, green: int, blue: int, furby: str | None = None) -> str:
         """Set the antenna light's colour, each channel 0-255; 0, 0, 0 turns it off."""
         for value, what in ((red, "red"), (green, "green"), (blue, "blue")):
             try:
@@ -200,16 +238,14 @@ def create_server(furbies=None):
             except ValueError as e:
                 raise ToolError(str(e)) from None
         chosen = furbies.pick(furby)
-        for f in chosen:
-            await f.set_antenna(red, green, blue)
+        await each(chosen, lambda f: f.set_antenna(red, green, blue))
         return f"Antenna set to ({red}, {green}, {blue}) on {', '.join(f.address for f in chosen)}"
 
     @server.tool(annotations=gentle)
-    async def set_eyes(on: bool, furby: str | None = "all") -> str:
+    async def set_eyes(on: bool, furby: str | None = None) -> str:
         """Turn the eyes' LCD backlight on or off."""
         chosen = furbies.pick(furby)
-        for f in chosen:
-            await f.command(protocol.lcd_command(on))
+        await each(chosen, lambda f: f.command(protocol.lcd_command(on)))
         return f"Eyes {'on' if on else 'off'} on {', '.join(f.address for f in chosen)}"
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True))
@@ -225,39 +261,48 @@ def create_server(furbies=None):
         except ValueError as e:
             raise ToolError(str(e)) from None
         chosen = furbies.pick(furby)
-        for f in chosen:
-            await f.command(command)
+        await each(chosen, lambda f: f.command(command))
         return f"{'Set' if mode == 'set' else 'Added'} {meter} {value} on {', '.join(f.address for f in chosen)}"
 
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True))
     async def flash_dlc(path: str, ctx: Context, furby: str | None = None, name: str | None = None) -> dict:
         """Upload a .dlc file to one Furby and make it the active DLC. DELETES every DLC already on that Furby.
 
-        Takes 2-3 minutes for a 300 KB file; files over 350 KB time out. name is what the Furby stores
-        it as (1-8 letters or digits; default: the file's name), and what furby_status reports.
-        The antenna turns green when done, red if it failed.
+        path is an absolute path on the computer running this server. Takes a few minutes (about 4 for
+        300 KB); files over 350 KB are refused, since they time out mid-upload. If the call is cancelled
+        or times out, the Furby is left with no DLC: flash it again. name is what the Furby stores it as
+        (1-8 letters or digits; default: the file's name), and what furby_status reports. The antenna
+        turns green when done, red if it failed. Returns the new DLC and the names of those deleted.
         """
-        file = Path(os.path.expanduser(path))
-        if file.suffix.lower() != ".dlc" or not file.is_file():
-            raise ToolError(f"{path} isn't a .dlc file")
-        data = file.read_bytes()
+        file = Path(path).expanduser()
+        if not file.is_absolute():
+            raise ToolError(f"Give the full path to the .dlc file, not {path!r}")
+        if file.suffix.lower() != ".dlc":
+            raise ToolError(f"{file.name} isn't a .dlc file")
+        if not file.is_file():
+            raise ToolError(f"{file} doesn't exist")
         try:
             protocol.dlc_filename(name or file.stem)
         except ValueError as e:
             raise ToolError(f"{e}; pass name= to store it under another name") from None
-        if len(data) > protocol.MAX_UPLOAD:
-            raise ToolError(f"{file.name} is {len(data):,} bytes; uploads over {protocol.MAX_UPLOAD:,} bytes time out")
+        size = file.stat().st_size
+        if size > protocol.MAX_UPLOAD:
+            raise ToolError(f"{file.name} is {size:,} bytes; uploads over {protocol.MAX_UPLOAD:,} bytes time out")
         chosen = furbies.pick(furby)
         if len(chosen) != 1:
             raise ToolError("Flash one Furby at a time: say which with furby=")
+        f = chosen[0]
 
         async def progress(done, total):
             await ctx.report_progress(done, total, f"Uploading {file.name}")
 
         try:
-            dlc = await chosen[0].flash(data, name or file.stem, progress=progress)
+            result = await f.flash(file.read_bytes(), name or file.stem, progress=progress)
         except Exception as e:
-            raise ToolError(f"Flashing failed: {e}. If it keeps failing, reset the Furby and try again.") from None
-        return {"furby": chosen[0].address, "dlc": dlc, "bytes": len(data)}
+            raise ToolError(
+                f"Flashing {f.address} failed: {reason(e)}. Its old DLCs may be gone; "
+                "flash again, and if it keeps failing, reset the Furby and try once more."
+            ) from None
+        return {"furby": f.address, **result, "bytes": size}
 
     return server

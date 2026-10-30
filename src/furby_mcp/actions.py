@@ -63,7 +63,7 @@ def find(query="", input=None, limit=25):
     words = WORD.findall(query.lower())
     matches = []
     for entry in catalog():
-        if input is not None and entry["action"][0] != input:
+        if input is not None and all(code[0] != input for code in (entry["action"], *entry["alternatives"])):
             continue
         haystack = f"{entry['category']} {entry['says']}".lower()
         if all(w in haystack for w in words):

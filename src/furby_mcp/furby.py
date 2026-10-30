@@ -12,6 +12,9 @@ import contextlib
 import logging
 import time
 
+import anyio
+from bleak import BleakClient, BleakScanner
+
 from . import protocol
 
 log = logging.getLogger("furby_mcp")
@@ -29,8 +32,6 @@ class ChecksumMismatch(RuntimeError):
 
 async def scan(timeout=8.0):
     """Furbies advertising in range, as (device, rssi) pairs, without connecting."""
-    from bleak import BleakScanner
-
     found = await BleakScanner.discover(timeout=timeout, return_adv=True)
     return [
         (device, adv.rssi)
@@ -44,9 +45,7 @@ class Furby:
 
     def __init__(self, device, client=None, on_disconnect=None):
         if client is None:
-            from bleak import BleakClient
-
-            client = BleakClient(device, disconnected_callback=lambda _: self._disconnected())
+            client = BleakClient(device, timeout=20.0, disconnected_callback=lambda _: self._disconnected())
         self.client = client
         self.address = getattr(device, "address", device)
         self.on_disconnect = on_disconnect
@@ -54,7 +53,8 @@ class Furby:
         self.last_sent = time.monotonic()
         self.antenna = None  # the colour last set, or None if unknown
         self.dlc = None  # the active DLC's {"slot", "name", "checksum"}, or None
-        self.busy = asyncio.Lock()  # one tool at a time per Furby; flashing holds it throughout
+        self.busy = asyncio.Lock()  # one action or flash at a time per Furby
+        self.flashing = False  # other tools refuse to touch a Furby while this is set
         self.unacked = 0
         self.caught_up = asyncio.Event()
         self.recheck_s = 1.0
@@ -72,8 +72,8 @@ class Furby:
         if self.on_disconnect:
             self.on_disconnect(self)
 
-    async def connect(self, timeout=20.0):
-        await self.client.connect(timeout=timeout)
+    async def connect(self):
+        await self.client.connect()
         try:
             await self.client.start_notify(protocol.GP_LISTEN, lambda _, data: self.on_response(bytes(data)))
             await self.client.start_notify(protocol.NORDIC_LISTEN, lambda _, data: self.on_nordic(bytes(data)))
@@ -221,22 +221,33 @@ class Furby:
         await self.client.write_gatt_char(protocol.NORDIC_WRITE, bytes(data), response=False)
 
     async def clear_slots(self):
-        """Delete the stored DLCs, so a new one gets a slot (instead of a tongue-and-tail reset)."""
-        filled, active = protocol.slots(await self.command(protocol.DLC_INFO, expect=protocol.DLC_INFO))
-        for slot in active:
-            await self.command([0x62, slot], expect=b"\xdc")  # deactivate
-        for slot in filled:
-            await self.command([0x74, slot], expect=b"\x74")
-            log.info("Deleted the DLC in slot %d of %s", slot, self)
+        """Delete the stored DLCs, so a new one gets a slot (instead of a tongue-and-tail reset).
+
+        Returns the names of the DLCs it deleted.
+        """
+        stored = await self.read_slots()
+        for entry in stored:
+            if entry["active"]:
+                await self.command([0x62, entry["slot"]], expect=b"\xdc")  # deactivate
+        for entry in stored:
+            await self.command([0x74, entry["slot"]], expect=b"\x74")
+            log.info("Deleted %s from slot %d of %s", entry["name"], entry["slot"], self)
         self.dlc = None
+        return [entry["name"] for entry in stored]
+
+    async def transfer_mode(self, entry, timeout):
+        reply = await self.wait(entry, timeout)
+        return reply[1] if len(reply) > 1 else None
 
     async def upload(self, data, filename, packet_delay, progress):
         await self.command(protocol.lcd_command(False))  # eyes off while uploading, as FurBLE does
-        await self.command(protocol.antenna_command(0, 0, 0))
+        await self.set_antenna(0, 0, 0)
         await self.nordic([0x09, 1, 0])  # packet acks on
-        done = None
+        ready = done = None
         try:
-            mode = (await self.command(protocol.announce_command(len(data), filename), expect=b"\x24", timeout=10))[1]
+            ready = self.listen(b"\x24")
+            await self.command(protocol.announce_command(len(data), filename))
+            mode = await self.transfer_mode(ready, 10)
             if mode != 2:
                 raise RuntimeError(f"the Furby answered the upload with {protocol.TRANSFER.get(mode, mode)}")
             done = self.listen(b"\x24")  # FileReceivedOk can follow the last packet at once
@@ -252,14 +263,18 @@ class Furby:
                 await asyncio.sleep(packet_delay)
                 if pos % (protocol.CHUNK * 500) == 0:
                     await progress(pos, len(data))
-            mode = (await self.wait(done, 60))[1]
+            await progress(len(data), len(data))
+            mode = await self.transfer_mode(done, 60)
             if mode != 5:
                 raise RuntimeError(f"upload failed: {protocol.TRANSFER.get(mode, mode)}")
         finally:
-            if done:
-                self.unlisten(done)
-            await self.nordic([0x09, 0, 0])
-            await self.command(protocol.lcd_command(True))
+            for entry in (ready, done):
+                if entry:
+                    self.unlisten(entry)
+            # Even if the tool call is cancelled: otherwise the eyes stay dark and acks stay on
+            with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+                await self.nordic([0x09, 0, 0])
+                await self.command(protocol.lcd_command(True))
 
     async def activate(self, checksum):
         filled, active = protocol.slots(await self.command(protocol.DLC_INFO, expect=protocol.DLC_INFO))
@@ -289,7 +304,8 @@ class Furby:
     async def flash(self, data, name, packet_delay=0.015, progress=None):
         """Replace every DLC on this Furby with data, stored as name, and make it the active one.
 
-        Turns the antenna green when done, red if anything failed.
+        Turns the antenna green when done, red if anything failed, including the tool
+        call being cancelled. Returns the new DLC and the names of the ones it deleted.
         """
 
         async def no_progress(done, total):
@@ -301,9 +317,12 @@ class Furby:
             raise ValueError(f"{len(data):,} bytes is too big: uploads over {protocol.MAX_UPLOAD:,} bytes time out")
         checksum = protocol.checksum(data)
         async with self.busy:
+            self.flashing = True
             try:
+                deleted = await self.clear_slots()
                 for attempt in range(2):
-                    await self.clear_slots()
+                    if attempt:
+                        await self.clear_slots()
                     await self.upload(data, filename, packet_delay, progress)
                     try:
                         await self.activate(checksum)
@@ -312,8 +331,11 @@ class Furby:
                         if attempt:
                             raise
                         log.warning("%s stored the wrong checksum (%s); uploading again", self, e)
-            except Exception:
-                await self.command(protocol.antenna_command(255, 0, 0))
+                await self.set_antenna(0, 255, 0)
+            except BaseException:  # cancellation too: the old DLCs are gone either way, so show it
+                with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+                    await self.set_antenna(255, 0, 0)
                 raise
-            await self.set_antenna(0, 255, 0)
-        return self.dlc
+            finally:
+                self.flashing = False
+        return {"dlc": self.dlc, "deleted": deleted}

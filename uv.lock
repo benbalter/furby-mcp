@@ -303,6 +303,7 @@ name = "furby-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "bleak" },
     { name = "mcp" },
 ]
@@ -316,6 +317,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4" },
     { name = "bleak", specifier = ">=3.0.2" },
     { name = "mcp", specifier = ">=2.3,<3" },
 ]

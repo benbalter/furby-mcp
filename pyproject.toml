@@ -15,7 +15,11 @@ classifiers = [
     "Topic :: System :: Hardware",
 ]
 # mcp 2 renamed FastMCP to MCPServer, so 1.x won't do
-dependencies = ["bleak>=3.0.2", "mcp>=2.3,<3"]
+dependencies = [
+    "anyio>=4",
+    "bleak>=3.0.2",
+    "mcp>=2.3,<3",
+]
 
 [project.urls]
 Homepage = "https://github.com/benbalter/furby-mcp"
